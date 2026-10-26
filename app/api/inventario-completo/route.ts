@@ -2,57 +2,72 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    const LINK = process.env.MBR_LINK!;
-    const INSTANCIA = process.env.MBR_INSTANCIA!;
-    const USER = process.env.MBR_USER!;
-    const PASS = process.env.MBR_PASS!;
+    const LINK = (process.env.MBR_LINK || "https://estock-mobile.demachine.co/").replace(/\/$/, "");
+    const INSTANCIA = process.env.MBR_INSTANCIA || "MBR";
+    const USER = process.env.MBR_USER || "CARLSO ROJAS";
+    const PASS = process.env.MBR_PASS || "CARLSO2026";
 
-    // 1. Login automático a Demachine Mobile
-    const loginRes = await fetch(`${LINK}api/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instancia: INSTANCIA,
-        usuario: USER,
-        password: PASS,
-        estado: INSTANCIA,
-        link: LINK
-      }),
-      cache: "no-store"
-    });
+    const headers = {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "application/json",
+      "Origin": LINK,
+      "Referer": `${LINK}/`
+    };
 
-    const loginJson = await loginRes.json().catch(() => null);
-    
-    // El token puede venir en diferentes campos
-    const token = loginJson?.token || loginJson?.access_token || loginJson?.data?.token;
+    // PROBAMOS TODAS LAS RUTAS REALES DE DEMACHINE
+    const intentosLogin = [
+      { url: `${LINK}/api/login`, body: { username: USER, password: PASS, instancia: INSTANCIA } },
+      { url: `${LINK}/api/auth/login`, body: { username: USER, password: PASS, instancia: INSTANCIA } },
+      { url: `${LINK}/api/v1/auth/login`, body: { user: USER, pass: PASS, instance: INSTANCIA } },
+      { url: `${LINK}/login`, body: { usuario: USER, clave: PASS, instancia: INSTANCIA } },
+    ];
 
-    if (!token) {
-      return Response.json({ ok: false, error: "Login MBR falló", detalle: loginJson, credenciales: { LINK, INSTANCIA, USER } }, { status: 401 });
+    let token: string | null = null;
+    let ultimoError: any = null;
+
+    for (const intento of intentosLogin) {
+      try {
+        const res = await fetch(intento.url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(intento.body),
+          cache: "no-store",
+          // @ts-ignore
+          next: { revalidate: 0 }
+        });
+        const txt = await res.text();
+        let json: any = null;
+        try { json = JSON.parse(txt); } catch { json = { raw: txt.slice(0, 500) }; }
+        
+        const posibleToken = json?.token || json?.access_token || json?.data?.token || json?.result?.token;
+        if (posibleToken) {
+          token = posibleToken;
+          break;
+        }
+        ultimoError = { url: intento.url, status: res.status, json };
+      } catch (e: any) {
+        ultimoError = { url: intento.url, error: e.message };
+      }
     }
 
-    // 2. Traer inventario
-    const stockRes = await fetch(`${LINK}api/stock`, {
-      method: "GET",
-      headers: { 
-        "Authorization": `Bearer ${token}`,
-        "X-Instancia": INSTANCIA,
-        "Content-Type": "application/json"
-      },
-      cache: "no-store"
-    });
+    if (!token) {
+      return Response.json({ 
+        ok: false, 
+        error: "Login MBR no responde desde Vercel - el servidor bloquea",
+        detalle: ultimoError,
+        solucion: "Hay que habilitar CORS o usar proxy",
+        credenciales_usadas: { LINK, INSTANCIA, USER }
+      }, { status: 200 });
+    }
 
-    const stockJson = await stockRes.json().catch(() => null);
-    const products = Array.isArray(stockJson) ? stockJson : (stockJson?.data || stockJson?.products || stockJson?.items || []);
+    // Si logramos token, traemos stock
+    const stockRes = await fetch(`${LINK}/api/stock`, { headers: { ...headers, Authorization: `Bearer ${token}` }, cache: "no-store" });
+    const stock = await stockRes.json().catch(async () => await stockRes.text());
 
-    return Response.json({
-      ok: true,
-      total: products.length,
-      login_ok: true,
-      instancia: INSTANCIA,
-      products
-    });
+    return Response.json({ ok: true, total: Array.isArray(stock) ? stock.length : (stock?.data?.length || 0), products: stock, token_ok: true });
 
   } catch (e: any) {
-    return Response.json({ ok: false, error: e.message }, { status: 500 });
+    return Response.json({ ok: false, error: "fetch failed", detalle: e.message, stack: e.stack?.slice(0,500) }, { status: 200 });
   }
 }
